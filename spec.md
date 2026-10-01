@@ -2,7 +2,7 @@
 
 Status: Draft
 Owner: Kevin Kaminski (@kkaminsk)
-Last updated: 2026-09-30 (rev 2)
+Last updated: 2026-09-30 (rev 3)
 
 ## 1. Overview and Goals
 
@@ -43,7 +43,7 @@ Access: X API pay-per-use (or higher tier). All calls use an app-only OAuth 2.0 
 |---|---|---|
 | Resolve my user ID (once, if `X_USER_ID` unset) | `GET /2/users/by/username/:username` | `X_USERNAME` |
 | My recent posts | `GET /2/users/:id/tweets` | `exclude=replies,retweets`, `start_time=now-LOOKBACK_DAYS`, `max_results`, `tweet.fields=conversation_id,created_at,public_metrics` |
-| Replies to and quote posts of a post (one call) | `GET /2/tweets/search/recent` | `query=(conversation_id:<post_id> is:reply OR quotes_of_tweet_id:<post_id>) -from:<my_username>`, `since_id=<cursor>`, `tweet.fields=author_id,conversation_id,in_reply_to_user_id,referenced_tweets,created_at,public_metrics`, `expansions=author_id`, `user.fields=username,name,public_metrics,verified,verified_type,description` |
+| Replies to and quote posts of a post (one call) | `GET /2/tweets/search/recent` | `query=(conversation_id:<post_id> is:reply OR quotes_of_tweet_id:<post_id>) -from:<my_username>`, `since_id=<cursor>`, `tweet.fields=author_id,conversation_id,in_reply_to_user_id,referenced_tweets,created_at,public_metrics`, `expansions=author_id`, `user.fields=username,name,public_metrics,verified,verified_type,description,created_at,profile_image_url` |
 | Accounts I follow (cached daily) | `GET /2/users/:id/following` | `max_results=1000`, paginated |
 
 ### 3.2 Constraints
@@ -76,6 +76,29 @@ Replies and quote posts are scored the same way. In this section, "reply" means 
 | High engagement | reply `public_metrics` | `like_count + reply_count + retweet_count >= ENGAGEMENT_MIN` (10) |
 | Criticism or misinformation | Grok | `category` in (`criticism`, `misinformation`) |
 | Business opportunity | Grok | `category == opportunity` |
+
+### 4.0 Bot and Spam Pre-filter
+
+Kevin's X audience includes a large share of bot accounts, so likely bots are dropped locally **before** scoring and before any Grok call. This costs nothing extra because all the signals come from fields already returned by the search call.
+
+Each author gets a bot score from these signals:
+
+| Signal | Rule | Points |
+|---|---|---|
+| New account | `created_at` newer than `BOT_MIN_ACCOUNT_AGE_DAYS` (30) | 2 |
+| Default avatar | `profile_image_url` contains `default_profile` | 1 |
+| Generated-looking handle | 6 or more trailing digits, for example `@crypto_king48213907` | 1 |
+| Lopsided follow ratio | `following_count > 10 * followers_count` and `followers_count < 100` | 1 |
+| Empty profile | blank `description` | 1 |
+| Spam text | matches patterns in `spam_patterns.txt` (for example "DM me", wallet addresses, "airdrop", "giveaway", "check my bio", unrelated links) | 2 |
+| Duplicate text | the same reply text, ignoring case and whitespace, posted by 3 or more different accounts in this run | 2 |
+
+- A reply is dropped when the bot score is at least `BOT_SCORE_MAX` (default 3).
+- Authors who are followed, VIP, or verified are **never** filtered.
+- Dropped replies are saved in `replies` with `category = bot_filtered` so they are not re-evaluated. They are not sent to Grok and not shown in the digest.
+- The count of filtered replies appears in the digest footer and in `runs.bots_filtered`.
+- `BOT_FILTER=false` disables the filter.
+- `spam_patterns.txt` is committed with sensible defaults and can be edited.
 
 ### 4.1 Rule-based Weight
 
@@ -124,7 +147,7 @@ score = rule_weight + urgency
 - Requests use structured output (`response_format` with a JSON schema) so the response parses without guesswork. Responses that fail validation are retried once and then skipped and logged.
 - Replies are batched (`GROK_BATCH_SIZE`, default 10) into a single request that returns an array of results, to reduce cost and latency.
 - The system prompt includes:
-  - Kevin's voice description, loaded from `voice.md` (gitignored, optional; a neutral default is used if missing).
+  - Kevin's voice description, loaded from `voice.md` (committed in the repo root; built from Kevin's public posts and profile).
   - The category definitions and scoring guidance from section 4.
   - Rules for drafts: at most 280 characters, no hashtags unless the reply used them, no promises of meetings or money, polite even toward criticism, and corrections cite facts without being combative.
 - Reply text is treated as untrusted input. It is wrapped in clear delimiters, and the prompt instructs Grok to ignore any instructions inside it.
@@ -138,7 +161,7 @@ SQLite database at `data/grokbot.db` (the `data/` directory is gitignored).
 | `posts` | `id` (PK), `created_at`, `text`, `since_id`, `last_checked_at` |
 | `replies` | `id` (PK), `post_id`, `kind` (`reply` or `quote`), `author_id`, `author_username`, `text`, `created_at`, `rule_weight`, `category`, `urgency`, `score`, `reason`, `suggested_reply`, `notified_at` (nullable) |
 | `following_cache` | `user_id` (PK), `username`, `refreshed_at` |
-| `runs` | `id` (PK), `started_at`, `finished_at`, `status`, `x_calls`, `x_objects`, `grok_calls`, `error` |
+| `runs` | `id` (PK), `started_at`, `finished_at`, `status`, `x_calls`, `x_objects`, `bots_filtered`, `grok_calls`, `error` |
 
 - A reply already present in `replies` is never re-sent to Grok.
 - `notified_at` is set only after the email is sent successfully, so a failed send is retried on the next run.
@@ -215,6 +238,11 @@ SCORE_THRESHOLD=5
 DIGEST_MAX_ITEMS=10
 GROK_BATCH_SIZE=10
 
+# Bot filter
+BOT_FILTER=true
+BOT_SCORE_MAX=3
+BOT_MIN_ACCOUNT_AGE_DAYS=30
+
 # Email
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
@@ -228,7 +256,9 @@ SEND_EMPTY_DIGEST=false
 RETENTION_DAYS=30
 ```
 
-Non-secret local files (gitignored): `vip.txt`, `voice.md`, `data/`, `logs/`.
+Committed files: `voice.md` (drafting voice) and `spam_patterns.txt` (bot filter patterns).
+
+Local files (gitignored): `vip.txt`, `data/`, `logs/`.
 
 ## 10. Module Layout
 
@@ -237,6 +267,7 @@ Non-secret local files (gitignored): `vip.txt`, `voice.md`, `data/`, `logs/`.
 | `src/config.py` | Lazy, typed settings object (see section 15) |
 | `src/x_client.py` | X API calls, pagination, rate-limit backoff, call counting |
 | `src/store.py` | SQLite schema, migrations, cursors, dedupe, retention |
+| `src/botfilter.py` | Bot score signals and the pre-filter (section 4.0) |
 | `src/scoring.py` | Rule-based signals and weights, final score, threshold logic |
 | `src/classifier.py` | Grok batching, prompt, JSON schema validation |
 | `src/emailer.py` | Digest rendering (HTML and text) and SMTP send |
@@ -247,6 +278,7 @@ Non-secret local files (gitignored): `vip.txt`, `voice.md`, `data/`, `logs/`.
 | `tests/test_x_client.py` | Mocked HTTP responses, including pagination and 429 |
 | `tests/test_store.py` | In-memory SQLite |
 | `tests/test_scoring.py` | Table-driven cases for each signal and threshold |
+| `tests/test_botfilter.py` | Table-driven cases for each bot signal, plus the followed, VIP, and verified bypass |
 | `tests/test_classifier.py` | Mocked Grok client, including invalid JSON retry |
 | `tests/test_emailer.py` | Rendering snapshots, mocked `smtplib.SMTP` |
 | `tests/test_digest.py` | End-to-end with all external calls mocked, dry run |
@@ -275,16 +307,18 @@ New dependency: `httpx` for the X API (plus `respx` for test mocking). No X SDK 
 | Milestone | Scope | Done when |
 |---|---|---|
 | M1 | Fix scaffold issues (section 15), lazy config, `x_client`, `store`, and printing new replies in the CLI | `python -m src.digest --dry-run` lists new replies and quote posts of recent posts, each labeled by kind |
-| M2 | `scoring` and `classifier` | Dry run shows ranked items with reasons and drafts |
+| M2 | `botfilter`, `scoring`, and `classifier` | Dry run shows ranked items with reasons and drafts, and a count of filtered bot replies |
 | M3 | `emailer` and Gmail SMTP | A real digest sent from Gmail arrives at `DIGEST_TO`, and the same items are not repeated |
 | M4 | Cron, lock file, usage logging, failure email, retention | Two scheduled runs complete unattended, and `runs` shows the API call counts |
 
 ## 14. Open Questions
 
-1. How should Kevin's voice be described for drafts? (A few sample replies in `voice.md` would work well.)
+None at this time.
 
 ### Resolved
 
+- Drafting voice: `voice.md`, built from Kevin's public Bluesky, LinkedIn, and Big Hat Group content (X itself requires login to read).
+- Bot replies: filtered locally before Grok (section 4.0).
 - Email sending: Kevin's personal Gmail over SMTP with an App Password (section 7.1).
 - X API budget: managed by Kevin in the X developer console. The bot reports call counts only (section 3.3).
 - Quote posts: included in v1 and fetched in the same search call as replies (sections 3.1 and 3.2). Replies under other people's quote posts are out of scope.
