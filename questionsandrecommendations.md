@@ -1,34 +1,19 @@
 # Questions and Recommendations
 
-Review of [spec.md](spec.md) (rev 3), listing what is still needed before building.
+Review of [spec.md](spec.md) (rev 4), listing what is still needed before building.
 Each question includes a recommended default, so "go with the defaults" is a valid answer.
 Answers get folded back into `spec.md`, and resolved items are removed from this file.
+Numbers stay the same as items are resolved, so references don't shift.
+
+Resolved so far: Q1, Q2, and Q4, and R1, R2, and R3 (see spec section 14).
 
 ## Questions
-
-### Q1. Should items you've already answered be hidden?
-
-Right now the search excludes your own posts, so the bot can't tell whether you already replied to someone. You could get a digest item for a conversation you handled an hour ago.
-
-**Recommended:** yes. Each run makes one extra search call (`from:<you> is:reply since_id=<cursor>`) to find your own recent replies. Any item you've already answered is suppressed and marked handled.
-
-### Q2. Should replies that gain traction later be re-checked?
-
-Engagement is measured once, when a reply is first seen, and replies are never re-evaluated. A fresh reply almost never has 10+ likes yet, so the "high engagement" signal will rarely fire.
-
-**Recommended:** re-fetch metrics once for un-notified replies that are 12 to 24 hours old, in one batched `GET /2/tweets?ids=...` call (up to 100 IDs). The alternative is to drop the engagement signal.
 
 ### Q3. Should plain direct questions count?
 
 In the original Q&A, "direct questions asked to me" was not selected. But someone asking "How did you configure Intune for this?" is often the reply most worth answering.
 
 **Recommended:** add a `question` category for Grok, scored on its urgency like the others.
-
-### Q4. Should every blue checkmark count as "verified"?
-
-Paid X Premium checkmarks are cheap, and many bot accounts have them. Right now any verified account gets a weight of 1 **and** bypasses the bot filter.
-
-**Recommended:** only `verified_type` of `business` or `government` gets the weight and the bypass. A plain blue checkmark is treated like any other account.
 
 ### Q5. Should VIPs always be surfaced, even for "great post!"?
 
@@ -42,7 +27,7 @@ The spec currently surfaces every VIP reply regardless of content.
 
 ### Q7. What does the hackathon demo look like, and when is it?
 
-This decides how much of milestones M1 to M4 is realistic and whether a demo mode is needed.
+This decides how much of milestones M0 to M4 is realistic and whether a demo mode is needed.
 
 **Recommended:** add a `--demo` flag that runs the full pipeline against recorded sample replies (no X API calls) and prints or emails the digest. That way the demo works on stage even without Wi-Fi or API credits.
 
@@ -58,31 +43,18 @@ The following list is fetched daily, 1,000 accounts per call. Under pay-per-use,
 
 **Recommended:** under about 2,000 follows, keep the daily refresh. Above that, refresh weekly, or drop the following list and rely on `vip.txt` only.
 
+### Q10. How is the custom GrokBot application hosted? (replaces R3)
+
+Spec section 8 is now host-neutral: one run per invocation, logs to stdout, secrets from environment variables, and state under `DATA_DIR`. Four details still decide how M4 is built:
+
+1. **Platform:** what runs the application (for example an xAI or Grok agent runtime, a container service such as Azure Container Apps Jobs, or a VM)?
+2. **Scheduler:** does the platform trigger runs at 08:00 and 17:00 itself, or does GrokBot need its own internal scheduler loop?
+3. **Persistent storage:** does `DATA_DIR` survive between runs? If not, the SQLite state (cursor, dedupe, following cache) is lost every run, and every reply would be re-sent to Grok and re-emailed. Storage would then need to move to a mounted volume, a blob or file share, or a hosted database.
+4. **Secrets:** how are the X token, Grok key, and Gmail App Password provided (platform secret store, Key Vault, or environment variables)?
+
+**Recommended:** if you're not sure yet, use a scheduled container job (for example Azure Container Apps Jobs with a cron trigger), with `DATA_DIR` on a mounted Azure Files share and secrets from Key Vault. This needs no code changes beyond what section 8 already describes.
+
 ## Recommendations (spec changes)
-
-### R1. Use one search per run instead of one per post (biggest cost saving)
-
-The spec makes one search call per recent post, so 20 posts means 20 calls every run, even when nothing is new. A single query covers all of them:
-
-```
-query: (to:<you> is:reply) OR quotes_of_tweet_id:<id1> OR quotes_of_tweet_id:<id2> ...  -from:<you>
-since_id: <one global cursor>
-```
-
-Results are then matched to posts using `conversation_id`, or the quoted post ID for quote posts. If the query hits the length limit (512 characters on lower tiers), split the quote IDs across 2 to 3 calls. This replaces the per-post `since_id` column with a single cursor.
-
-### R2. Verify search operators against your plan before M1
-
-Confirm on your pay-per-use plan that `quotes_of_tweet_id:`, `to:`, and `conversation_id:` are available, and check the maximum query length. Build a tiny `scripts/probe_x.py` that runs one query and prints the results. This is the riskiest assumption in the spec.
-
-### R3. Make cron reliable in WSL2
-
-Cron doesn't start automatically in WSL2. Runs are also missed while the laptop is asleep or WSL is shut down.
-
-- Option A: enable systemd in WSL (`/etc/wsl.conf`, `[boot] systemd=true`) and use a systemd timer with `Persistent=true`, so missed runs fire on the next start.
-- Option B: use Windows Task Scheduler to run `wsl.exe -d <distro> -- /home/dev/GrokBotDemo/.venv/bin/python -m src.digest` with "run task as soon as possible after a scheduled start is missed."
-
-Option B is simpler and survives WSL being idle. Missing a run loses no data, because the cursor catches up on the next run, as long as the gap is under 7 days.
 
 ### R4. Fix the Grok categories so they describe content only
 
@@ -94,15 +66,15 @@ The rule-based weights continue to handle who the author is. The digest groups i
 
 ### R5. Reorder section 4 to match the pipeline
 
-Section 4.0 (bot filter) currently sits after the candidate table. Restructure section 4 as: 4.1 bot filter, 4.2 rule-based signals and weights, 4.3 Grok classification, 4.4 final score. Also add the pipeline diagram from the plan to section 1.
+Section 4.0 (bot filter) currently sits after the candidate table. Restructure section 4 as: 4.1 bot filter, 4.2 rule-based signals and weights, 4.3 Grok classification, 4.4 final score. Also add a pipeline diagram to section 1.
 
 ### R6. Update `.gitignore` now, since the repo is public
 
-Add `data/`, `logs/`, `vip.txt`, and `*.db` before any code writes them. VIP handles and stored reply data should never end up in a public repo.
+Add `data/`, `vip.txt`, and `*.db` before any code writes them. VIP handles and stored reply data should never end up in a public repo.
 
-### R7. Protect the `.env` file
+### R7. Protect secrets
 
-The Gmail App Password and X token sit in plain text. Run `chmod 600 .env`, and add a startup check that warns if `.env` is readable by group or others.
+Locally, run `chmod 600 .env`, and add a startup check that warns if `.env` is readable by group or others. On the host, use the platform's secret store rather than a `.env` file (see Q10).
 
 ### R8. Handle partial Grok batch responses
 
@@ -110,7 +82,7 @@ When 10 replies are sent and Grok returns 9 results, or a mismatched `reply_id`,
 
 ### R9. Test with recorded fixtures
 
-X has no sandbox. Save a few real search responses (with handles anonymized) under `tests/fixtures/` and use them in the `x_client` and end-to-end tests. The same fixtures can power `--demo` (Q7).
+X has no sandbox. Save a few real search responses (with handles anonymized) under `tests/fixtures/`, for example from the M0 probe script. Use them in the `x_client` and end-to-end tests. The same fixtures can power `--demo` (Q7).
 
 ### R10. Add a simple quality loop (post-hackathon)
 

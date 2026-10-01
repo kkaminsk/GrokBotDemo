@@ -2,7 +2,7 @@
 
 Status: Draft
 Owner: Kevin Kaminski (@kkaminsk)
-Last updated: 2026-09-30 (rev 3)
+Last updated: 2026-09-30 (rev 4)
 
 ## 1. Overview and Goals
 
@@ -13,7 +13,7 @@ GrokBot watches the replies to and quote posts of Kevin's recent posts on X, dec
 - Surface the handful of replies that actually deserve attention, instead of reading every reply.
 - Explain *why* each reply was flagged.
 - Provide a ready-to-edit suggested reply in Kevin's voice.
-- Run unattended on a schedule on Kevin's machine with bounded API usage per run. (Kevin manages the X API budget himself; the bot only reports usage.)
+- Run unattended on a schedule as a custom GrokBot application, with bounded API usage per run. (Kevin manages the X API budget himself; the bot only reports usage.)
 
 ### Non-goals
 
@@ -21,6 +21,12 @@ GrokBot watches the replies to and quote posts of Kevin's recent posts on X, dec
 - No web dashboard or chat integrations (email only for v1).
 - No analysis of mentions that are not replies to or quote posts of Kevin's posts.
 - No analysis of replies underneath other people's quote posts.
+- No analysis of side conversations inside Kevin's threads (replies to other repliers).
+
+### Known Limitations (accepted)
+
+- **Already-answered replies are not detected.** The bot does not check whether Kevin has already responded. A reply he answered before the digest arrived can still appear in it.
+- **Engagement is measured once.** A reply's likes, replies, and reposts are recorded when the bot first sees it and are never re-checked. The high-engagement signal therefore mostly fires for replies that are already a few hours old when a run picks them up.
 
 ## 2. User Stories
 
@@ -43,14 +49,17 @@ Access: X API pay-per-use (or higher tier). All calls use an app-only OAuth 2.0 
 |---|---|---|
 | Resolve my user ID (once, if `X_USER_ID` unset) | `GET /2/users/by/username/:username` | `X_USERNAME` |
 | My recent posts | `GET /2/users/:id/tweets` | `exclude=replies,retweets`, `start_time=now-LOOKBACK_DAYS`, `max_results`, `tweet.fields=conversation_id,created_at,public_metrics` |
-| Replies to and quote posts of a post (one call) | `GET /2/tweets/search/recent` | `query=(conversation_id:<post_id> is:reply OR quotes_of_tweet_id:<post_id>) -from:<my_username>`, `since_id=<cursor>`, `tweet.fields=author_id,conversation_id,in_reply_to_user_id,referenced_tweets,created_at,public_metrics`, `expansions=author_id`, `user.fields=username,name,public_metrics,verified,verified_type,description,created_at,profile_image_url` |
+| All new replies and quote posts (one call per run) | `GET /2/tweets/search/recent` | `query=((to:<my_username> is:reply) OR quotes_of_tweet_id:<id1> OR quotes_of_tweet_id:<id2> ...) -from:<my_username>`, `since_id=<global cursor>`, `max_results=100` (paginated up to `MAX_RESULTS`), `tweet.fields=author_id,conversation_id,in_reply_to_user_id,referenced_tweets,created_at,public_metrics`, `expansions=author_id`, `user.fields=username,name,public_metrics,verified,verified_type,description,created_at,profile_image_url` |
 | Accounts I follow (cached daily) | `GET /2/users/:id/following` | `max_results=1000`, paginated |
 
 ### 3.2 Constraints
 
 - `search/recent` only covers the last 7 days, so `LOOKBACK_DAYS` is capped at 7.
-- By default only replies where `in_reply_to_user_id == my_id` (direct replies to Kevin, at any depth of his threads) are scored. `INCLUDE_THREAD_REPLIES=true` also scores side-conversations inside the thread.
-- Each result is tagged with a `kind`: `quote` when `referenced_tweets` contains `type=quoted` pointing at Kevin's post, otherwise `reply`. Quote posts are always scored (the `in_reply_to_user_id` filter does not apply to them). Set `INCLUDE_QUOTES=false` to turn them off.
+- A single search per run covers everything. `to:<my_username>` matches direct replies to Kevin, and the `quotes_of_tweet_id:` terms are built from the recent posts returned by `GET /2/users/:id/tweets` (up to `MAX_POSTS`).
+- Each result is matched to Kevin's post by `conversation_id` (replies) or by the quoted post ID (quote posts). Replies to Kevin in conversations he didn't start are still included and shown without an original-post snippet.
+- Side conversations inside Kevin's threads (replies to other repliers) are out of scope, since covering them would need one search per post.
+- If the query exceeds the plan's maximum query length, the `quotes_of_tweet_id:` terms are split across additional calls that share the same cursor. The limit is set by `X_MAX_QUERY_LENGTH` (default 512).
+- Each result is tagged with a `kind`: `quote` when `referenced_tweets` contains `type=quoted` pointing at Kevin's post, otherwise `reply`. Set `INCLUDE_QUOTES=false` to leave out the quote terms.
 - If a post is both a reply in Kevin's thread and a quote of his post, it is treated as a `reply`.
 - The VIP list is a plain text file (`vip.txt`, one handle per line, gitignored) merged with the cached following list.
 
@@ -58,9 +67,9 @@ Access: X API pay-per-use (or higher tier). All calls use an app-only OAuth 2.0 
 
 Kevin manages the X API budget directly in the X developer console. The bot does not estimate or enforce spend; it only keeps per-run usage bounded and visible:
 
-- A `since_id` cursor per post is stored in SQLite so each run only fetches new replies and quote posts.
-- `MAX_POSTS` caps how many recent posts are scanned per run (default 20).
-- `MAX_REPLIES` caps results (replies plus quote posts) fetched per post per run (default 100).
+- A single global `since_id` cursor is stored in the `state` table so each run only fetches new replies and quote posts. A quiet run costs two calls: recent posts and one search.
+- `MAX_POSTS` caps how many recent posts are included as quote terms (default 20).
+- `MAX_RESULTS` caps total results (replies plus quote posts) fetched per run (default 300). If the cap is hit, the cursor advances only to the newest result actually processed, so nothing is skipped and the rest is picked up next run.
 - The following list is refreshed at most once every 24 hours.
 - Each run records the number of X calls and returned objects in the `runs` table and the digest footer.
 
@@ -71,7 +80,7 @@ Replies and quote posts are scored the same way. In this section, "reply" means 
 | Signal | Source | Default rule |
 |---|---|---|
 | Influential author | X user `public_metrics` | `followers_count >= INFLUENCER_MIN_FOLLOWERS` (5,000) |
-| Verified author | X user `verified` / `verified_type` | verified is true |
+| Verified organization | X user `verified_type` | `business` or `government` (a paid blue checkmark does not count) |
 | Followed or VIP author | following cache + `vip.txt` | author in set |
 | High engagement | reply `public_metrics` | `like_count + reply_count + retweet_count >= ENGAGEMENT_MIN` (10) |
 | Criticism or misinformation | Grok | `category` in (`criticism`, `misinformation`) |
@@ -94,7 +103,7 @@ Each author gets a bot score from these signals:
 | Duplicate text | the same reply text, ignoring case and whitespace, posted by 3 or more different accounts in this run | 2 |
 
 - A reply is dropped when the bot score is at least `BOT_SCORE_MAX` (default 3).
-- Authors who are followed, VIP, or verified are **never** filtered.
+- Authors who are followed, VIP, or a verified organization (`verified_type` of `business` or `government`) are **never** filtered. A paid blue checkmark gives no bypass.
 - Dropped replies are saved in `replies` with `category = bot_filtered` so they are not re-evaluated. They are not sent to Grok and not shown in the digest.
 - The count of filtered replies appears in the digest footer and in `runs.bots_filtered`.
 - `BOT_FILTER=false` disables the filter.
@@ -107,7 +116,7 @@ Computed locally with no API cost. Weights are configurable:
 | Signal | Weight env var | Default |
 |---|---|---|
 | Influential | `W_INFLUENTIAL` | 2 |
-| Verified | `W_VERIFIED` | 1 |
+| Verified organization | `W_VERIFIED` | 1 |
 | Followed | `W_FOLLOWED` | 2 |
 | VIP | `W_VIP` | 4 |
 | High engagement | `W_ENGAGEMENT` | 2 |
@@ -158,7 +167,8 @@ SQLite database at `data/grokbot.db` (the `data/` directory is gitignored).
 
 | Table | Columns |
 |---|---|
-| `posts` | `id` (PK), `created_at`, `text`, `since_id`, `last_checked_at` |
+| `state` | `key` (PK), `value` (holds `search_since_id` and `following_refreshed_at`) |
+| `posts` | `id` (PK), `created_at`, `text` |
 | `replies` | `id` (PK), `post_id`, `kind` (`reply` or `quote`), `author_id`, `author_username`, `text`, `created_at`, `rule_weight`, `category`, `urgency`, `score`, `reason`, `suggested_reply`, `notified_at` (nullable) |
 | `following_cache` | `user_id` (PK), `username`, `refreshed_at` |
 | `runs` | `id` (PK), `started_at`, `finished_at`, `status`, `x_calls`, `x_objects`, `bots_filtered`, `grok_calls`, `error` |
@@ -200,16 +210,17 @@ The digest is sent from Kevin's personal Gmail account over SMTP with STARTTLS, 
 - If a run crashes, a short failure email with the error summary is sent to `DIGEST_TO`. Failure emails are limited to one per 6 hours.
 - `--dry-run` prints the digest to stdout instead of sending it and does not set `notified_at`.
 
-## 8. Scheduling
+## 8. Runtime and Scheduling
 
-- Entry point: `python -m src.digest` (flags: `--dry-run`, `--verbose`).
-- Example crontab line, which runs at 08:00 and 17:00 local time:
+GrokBot is developed in WSL but **runs as a custom GrokBot application**, not in WSL. The code must therefore not depend on the development machine:
 
-```
-0 8,17 * * * cd /home/dev/GrokBotDemo && .venv/bin/python -m src.digest >> logs/digest.log 2>&1
-```
+- **Entry point:** `python -m src.digest` performs exactly one run and exits (flags: `--dry-run`, `--verbose`). The host's scheduler triggers it at 08:00 and 17:00 in `DIGEST_TIMEZONE` (default `America/Edmonton`).
+- **Paths:** the SQLite file and lock file live under `DATA_DIR` (default `./data`). Logs go to stdout so the host can collect them.
+- **Secrets:** read from environment variables. A `.env` file is used only for local development.
+- **Overlap:** a lock file in `DATA_DIR` (`fcntl.flock`) prevents two runs from overlapping. If the lock is held, the new run exits immediately with a log line.
+- **Missed runs:** need no special handling. The global cursor catches up on the next run, as long as the gap is under 7 days.
 
-- A lock file (`data/digest.lock`, using `fcntl.flock`) prevents two runs from overlapping. If the lock is held, the new run exits immediately with a log line.
+The hosting details are still open (section 14): the scheduler, whether `DATA_DIR` persists between runs, and how secrets are injected.
 
 ## 9. Configuration
 
@@ -222,8 +233,8 @@ X_USERNAME=
 X_USER_ID=
 LOOKBACK_DAYS=3
 MAX_POSTS=20
-MAX_REPLIES=100
-INCLUDE_THREAD_REPLIES=false
+MAX_RESULTS=300
+X_MAX_QUERY_LENGTH=512
 INCLUDE_QUOTES=true
 
 # Scoring
@@ -258,7 +269,14 @@ RETENTION_DAYS=30
 
 Committed files: `voice.md` (drafting voice) and `spam_patterns.txt` (bot filter patterns).
 
-Local files (gitignored): `vip.txt`, `data/`, `logs/`.
+Local files (gitignored): `vip.txt`, `data/`.
+
+Runtime settings:
+
+```
+DATA_DIR=./data
+DIGEST_TIMEZONE=America/Edmonton
+```
 
 ## 10. Module Layout
 
@@ -272,6 +290,7 @@ Local files (gitignored): `vip.txt`, `data/`, `logs/`.
 | `src/classifier.py` | Grok batching, prompt, JSON schema validation |
 | `src/emailer.py` | Digest rendering (HTML and text) and SMTP send |
 | `src/digest.py` | Orchestrates one run, CLI flags, lock file, failure email |
+| `scripts/probe_x.py` | One-off check that the X search operators work on Kevin's plan (milestone M0) |
 
 | Test file | Approach |
 |---|---|
@@ -287,7 +306,7 @@ New dependency: `httpx` for the X API (plus `respx` for test mocking). No X SDK 
 
 ## 11. Error Handling
 
-- **X API 429:** wait until the `x-rate-limit-reset` header time (capped at 15 minutes), then retry. After 3 failures, skip the post and continue.
+- **X API 429:** wait until the `x-rate-limit-reset` header time (capped at 15 minutes), then retry. After 3 failures, end the run without advancing the cursor, so the next run picks up the same results.
 - **X API 5xx or timeouts:** exponential backoff, at most 3 attempts.
 - **X API 401 or 403:** abort the run and send a failure email, since the token or plan is likely invalid.
 - **Grok errors:** retry once with backoff. On a second failure, save the replies without a classification. They are retried next run and scored with rule weights only in the meantime.
@@ -306,17 +325,24 @@ New dependency: `httpx` for the X API (plus `respx` for test mocking). No X SDK 
 
 | Milestone | Scope | Done when |
 |---|---|---|
+| M0 | `scripts/probe_x.py`: run one real search with the operators from section 3.1 on Kevin's plan, and print the results and the maximum accepted query length | `to:`, `quotes_of_tweet_id:`, and `is:reply` are confirmed working, and `X_MAX_QUERY_LENGTH` is set from the result. If an operator is unavailable, section 3 is revised before M1 |
 | M1 | Fix scaffold issues (section 15), lazy config, `x_client`, `store`, and printing new replies in the CLI | `python -m src.digest --dry-run` lists new replies and quote posts of recent posts, each labeled by kind |
 | M2 | `botfilter`, `scoring`, and `classifier` | Dry run shows ranked items with reasons and drafts, and a count of filtered bot replies |
 | M3 | `emailer` and Gmail SMTP | A real digest sent from Gmail arrives at `DIGEST_TO`, and the same items are not repeated |
-| M4 | Cron, lock file, usage logging, failure email, retention | Two scheduled runs complete unattended, and `runs` shows the API call counts |
+| M4 | Deploy as a custom GrokBot application with its scheduler, plus the lock file, usage logging, failure email, and retention | Two scheduled runs complete unattended on the host, and `runs` shows the API call counts |
 
 ## 14. Open Questions
 
-None at this time.
+1. Hosting for the custom GrokBot application: what runs it, what triggers the schedule, whether `DATA_DIR` persists between runs, and how secrets are provided.
+
+Further questions are tracked in [questionsandrecommendations.md](questionsandrecommendations.md).
 
 ### Resolved
 
+- One search per run with a global cursor (section 3.1), confirmed first by a probe script (milestone M0).
+- Verified signal: only `business` and `government` checkmarks count (section 4).
+- Already-answered replies and one-time engagement checks: accepted as known limitations (section 1).
+- Runtime: a custom GrokBot application, not WSL (section 8).
 - Drafting voice: `voice.md`, built from Kevin's public Bluesky, LinkedIn, and Big Hat Group content (X itself requires login to read).
 - Bot replies: filtered locally before Grok (section 4.0).
 - Email sending: Kevin's personal Gmail over SMTP with an App Password (section 7.1).
