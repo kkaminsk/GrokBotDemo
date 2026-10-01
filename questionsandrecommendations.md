@@ -1,11 +1,11 @@
 # Questions and Recommendations
 
-Review of [spec.md](spec.md) (rev 4), listing what is still needed before building.
+Review of [spec.md](spec.md) (rev 5), listing what is still needed before building.
 Each question includes a recommended default, so "go with the defaults" is a valid answer.
 Answers get folded back into `spec.md`, and resolved items are removed from this file.
 Numbers stay the same as items are resolved, so references don't shift.
 
-Resolved so far: Q1, Q2, and Q4, and R1, R2, and R3 (see spec section 14).
+Resolved so far: Q1, Q2, Q4, and Q10, and R1, R2, and R3 (see spec section 14).
 
 ## Questions
 
@@ -43,17 +43,6 @@ The following list is fetched daily, 1,000 accounts per call. Under pay-per-use,
 
 **Recommended:** under about 2,000 follows, keep the daily refresh. Above that, refresh weekly, or drop the following list and rely on `vip.txt` only.
 
-### Q10. How is the custom GrokBot application hosted? (replaces R3)
-
-Spec section 8 is now host-neutral: one run per invocation, logs to stdout, secrets from environment variables, and state under `DATA_DIR`. Four details still decide how M4 is built:
-
-1. **Platform:** what runs the application (for example an xAI or Grok agent runtime, a container service such as Azure Container Apps Jobs, or a VM)?
-2. **Scheduler:** does the platform trigger runs at 08:00 and 17:00 itself, or does GrokBot need its own internal scheduler loop?
-3. **Persistent storage:** does `DATA_DIR` survive between runs? If not, the SQLite state (cursor, dedupe, following cache) is lost every run, and every reply would be re-sent to Grok and re-emailed. Storage would then need to move to a mounted volume, a blob or file share, or a hosted database.
-4. **Secrets:** how are the X token, Grok key, and Gmail App Password provided (platform secret store, Key Vault, or environment variables)?
-
-**Recommended:** if you're not sure yet, use a scheduled container job (for example Azure Container Apps Jobs with a cron trigger), with `DATA_DIR` on a mounted Azure Files share and secrets from Key Vault. This needs no code changes beyond what section 8 already describes.
-
 ## Recommendations (spec changes)
 
 ### R4. Fix the Grok categories so they describe content only
@@ -74,7 +63,7 @@ Add `data/`, `vip.txt`, and `*.db` before any code writes them. VIP handles and 
 
 ### R7. Protect secrets
 
-Locally, run `chmod 600 .env`, and add a startup check that warns if `.env` is readable by group or others. On the host, use the platform's secret store rather than a `.env` file (see Q10).
+Locally, run `chmod 600 .env`, and add a startup check that warns if `.env` is readable by group or others. On Grok Bot, use the Bot's Secrets section rather than a `.env` file (spec section 8.1).
 
 ### R8. Handle partial Grok batch responses
 
@@ -96,3 +85,4 @@ To tune the thresholds, add a "Useful? yes / no" `mailto:` link to each digest i
 - [ ] Create `vip.txt` with the handles you always want surfaced.
 - [ ] Get a Grok API key from console.x.ai.
 - [ ] Review `voice.md` and edit anything that doesn't sound like you.
+- [ ] In Grok Bot, create the "X Reply Scout" Bot, add its Secrets, clone the repo to `/workspace`, and create the routine (spec section 8.1).

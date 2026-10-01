@@ -2,7 +2,7 @@
 
 Status: Draft
 Owner: Kevin Kaminski (@kkaminsk)
-Last updated: 2026-09-30 (rev 4)
+Last updated: 2026-09-30 (rev 5)
 
 ## 1. Overview and Goals
 
@@ -212,7 +212,7 @@ The digest is sent from Kevin's personal Gmail account over SMTP with STARTTLS, 
 
 ## 8. Runtime and Scheduling
 
-GrokBot is developed in WSL but **runs as a custom GrokBot application**, not in WSL. The code must therefore not depend on the development machine:
+GrokBot is developed in WSL but **runs as a Bot in the Grok Bot app** (section 8.1), not in WSL. The code must therefore not depend on the development machine:
 
 - **Entry point:** `python -m src.digest` performs exactly one run and exits (flags: `--dry-run`, `--verbose`). The host's scheduler triggers it at 08:00 and 17:00 in `DIGEST_TIMEZONE` (default `America/Edmonton`).
 - **Paths:** the SQLite file and lock file live under `DATA_DIR` (default `./data`). Logs go to stdout so the host can collect them.
@@ -220,7 +220,33 @@ GrokBot is developed in WSL but **runs as a custom GrokBot application**, not in
 - **Overlap:** a lock file in `DATA_DIR` (`fcntl.flock`) prevents two runs from overlapping. If the lock is held, the new run exits immediately with a log line.
 - **Missed runs:** need no special handling. The global cursor catches up on the next run, as long as the gap is under 7 days.
 
-The hosting details are still open (section 14): the scheduler, whether `DATA_DIR` persists between runs, and how secrets are injected.
+### 8.1 Hosting on Grok Bot
+
+GrokBot runs as a dedicated Bot in the Grok Bot app ("X Reply Scout"). The Bot owns scheduling, storage, and secrets. The Python script does all the fetching, scoring, Grok calls, and email, so behavior stays deterministic and testable.
+
+| Concern | How it is handled |
+|---|---|
+| Code location | Cloned to `/workspace/GrokBotDemo` on the Bot's persistent cloud computer. `/workspace` survives computer updates and recovery. |
+| Persistent state | `DATA_DIR=/workspace/GrokBotDemo/data`, so the SQLite cursor, dedupe, and following cache persist between runs. |
+| Dependencies | Installed into `/workspace/GrokBotDemo/.venv`. Each routine run recreates the venv if a computer Reset removed it. |
+| Secrets | Stored in the Bot's **Secrets** section as environment variables: `X_BEARER_TOKEN`, `GROK_API_KEY`, `SMTP_USER`, `SMTP_PASSWORD`, and `DIGEST_FROM`. No `.env` file on the Bot computer, because the computer and its files are shared by every Bot on the account. |
+| Schedule | A Bot routine at 08:00 and 17:00, using the Grok Bot timezone setting (America/Edmonton). |
+| Logs | The routine posts the last 20 lines of output to the Bot's conversation, and failures are reported there as well as by the failure email. |
+
+Bot description (standing rules):
+
+> Own the twice-daily X reply digest for @kkaminsk. Run GrokBotDemo from /workspace/GrokBotDemo. Never post, reply, like, follow, or DM on X. Never print or write secrets to files or chat. If a run fails, report the error here instead of retrying more than once.
+
+Routine instruction:
+
+> Every day at 8:00 AM and 5:00 PM, in /workspace/GrokBotDemo: if .venv is missing, recreate it and install requirements.txt. Then run `.venv/bin/python -m src.digest` and post the last 20 lines of output here. Do not post anything to X.
+
+Operational notes:
+
+- A new routine first runs at its next scheduled time. Use **Test** to verify it immediately.
+- Grok Bot may pause long-running unattended routines, so check periodically that the routine is still enabled.
+- Code updates are deployed on request ("pull the latest GrokBotDemo and reinstall requirements"), not automatically on every run.
+- Grok Bot has no public API, so setup is done through the Grok Bot app.
 
 ## 9. Configuration
 
@@ -316,7 +342,7 @@ New dependency: `httpx` for the X API (plus `respx` for test mocking). No X SDK 
 
 ## 12. Security and Privacy
 
-- Secrets (`X_BEARER_TOKEN`, `GROK_API_KEY`, `SMTP_PASSWORD`) live only in `.env`, which is gitignored. They are never logged.
+- Secrets (`X_BEARER_TOKEN`, `GROK_API_KEY`, `SMTP_PASSWORD`) are never logged. In development they live in `.env`, which is gitignored. In production they live in the Grok Bot **Secrets** section (section 8.1).
 - Reply data is stored only in the local SQLite file and purged after `RETENTION_DAYS`.
 - Reply text sent to Grok is limited to what is needed for classification (post text, reply text, and author public profile fields).
 - Prompt-injection defense: reply text is delimited and treated as data (section 5). Drafts are never posted automatically.
@@ -329,20 +355,18 @@ New dependency: `httpx` for the X API (plus `respx` for test mocking). No X SDK 
 | M1 | Fix scaffold issues (section 15), lazy config, `x_client`, `store`, and printing new replies in the CLI | `python -m src.digest --dry-run` lists new replies and quote posts of recent posts, each labeled by kind |
 | M2 | `botfilter`, `scoring`, and `classifier` | Dry run shows ranked items with reasons and drafts, and a count of filtered bot replies |
 | M3 | `emailer` and Gmail SMTP | A real digest sent from Gmail arrives at `DIGEST_TO`, and the same items are not repeated |
-| M4 | Deploy as a custom GrokBot application with its scheduler, plus the lock file, usage logging, failure email, and retention | Two scheduled runs complete unattended on the host, and `runs` shows the API call counts |
+| M4 | Deploy to the "X Reply Scout" Bot in Grok Bot (section 8.1) with secrets and a routine, plus the lock file, usage logging, failure email, and retention | Two scheduled routine runs complete unattended, state persists between them, and `runs` shows the API call counts |
 
 ## 14. Open Questions
 
-1. Hosting for the custom GrokBot application: what runs it, what triggers the schedule, whether `DATA_DIR` persists between runs, and how secrets are provided.
-
-Further questions are tracked in [questionsandrecommendations.md](questionsandrecommendations.md).
+None in the spec itself. Further questions are tracked in [questionsandrecommendations.md](questionsandrecommendations.md).
 
 ### Resolved
 
 - One search per run with a global cursor (section 3.1), confirmed first by a probe script (milestone M0).
 - Verified signal: only `business` and `government` checkmarks count (section 4).
 - Already-answered replies and one-time engagement checks: accepted as known limitations (section 1).
-- Runtime: a custom GrokBot application, not WSL (section 8).
+- Runtime: a Bot in the Grok Bot app that runs the script on a routine, with state in `/workspace` and keys in Bot Secrets (section 8.1).
 - Drafting voice: `voice.md`, built from Kevin's public Bluesky, LinkedIn, and Big Hat Group content (X itself requires login to read).
 - Bot replies: filtered locally before Grok (section 4.0).
 - Email sending: Kevin's personal Gmail over SMTP with an App Password (section 7.1).
