@@ -2,11 +2,26 @@
 
 Status: Draft
 Owner: Kevin Kaminski (@kkaminsk)
-Last updated: 2026-09-30 (rev 6)
+Last updated: 2026-09-30 (rev 7)
 
 ## 1. Overview and Goals
 
 GrokBot watches the replies to and quote posts of Kevin's recent posts on X, decides which ones are worth a personal follow-up, and emails a digest with a short explanation and a Grok-drafted suggested reply for each one.
+
+### Pipeline
+
+```mermaid
+flowchart LR
+    Routine["Grok Bot routine"] --> Posts["Fetch my recent posts"]
+    Posts --> Search["One search: new replies and quote posts"]
+    Search --> Dedupe["Skip already-seen replies"]
+    Dedupe --> BotFilter["Bot filter"]
+    BotFilter --> Weights["Rule-based weight"]
+    Weights --> Grok["Grok: classify, urgency, draft"]
+    Grok --> Rank["Final score and surfacing rules"]
+    Rank --> Email["Gmail SMTP digest"]
+    Email --> Mark["Mark items notified"]
+```
 
 ### Goals
 
@@ -76,19 +91,14 @@ Kevin manages the X API budget directly in the X developer console. The bot does
 
 ## 4. Follow-up Criteria and Scoring
 
-Replies and quote posts are scored the same way. In this section, "reply" means either. A reply is a candidate if **any** of these apply:
+Replies and quote posts are scored the same way. In this section, "reply" means either. Each new reply goes through four steps, in this order:
 
-| Signal | Source | Default rule |
-|---|---|---|
-| Influential author | X user `public_metrics` | `followers_count >= INFLUENCER_MIN_FOLLOWERS` (5,000) |
-| Verified organization | X user `verified_type` | `business` or `government` (a paid blue checkmark does not count) |
-| Followed or VIP author | following cache + `vip.txt` | author in set |
-| High engagement | reply `public_metrics` | `like_count + reply_count + retweet_count >= ENGAGEMENT_MIN` (10) |
-| On-topic question | Grok | `category == question` |
-| Criticism or misinformation | Grok | `category` in (`criticism`, `misinformation`) |
-| Business opportunity | Grok | `category == opportunity` |
+1. **Bot filter** (section 4.1): drop likely bots locally. No API cost.
+2. **Rule-based weight** (section 4.2): score who the author is and how much engagement the reply has. No API cost.
+3. **Grok classification** (section 4.3): classify the content, rate urgency, and draft a reply.
+4. **Final score** (section 4.4): combine the weight and urgency, then apply the surfacing rules.
 
-### 4.0 Bot and Spam Pre-filter
+### 4.1 Bot and Spam Filter
 
 Kevin's X audience includes a large share of bot accounts, so likely bots are dropped locally **before** scoring and before any Grok call. This costs nothing extra because all the signals come from fields already returned by the search call.
 
@@ -111,21 +121,23 @@ Each author gets a bot score from these signals:
 - `BOT_FILTER=false` disables the filter.
 - `spam_patterns.txt` is committed with sensible defaults and can be edited.
 
-### 4.1 Rule-based Weight
+### 4.2 Rule-based Weight
 
-Computed locally with no API cost. Weights are configurable:
+These signals describe the author and the reply's engagement. They are computed locally, and the weights can be changed in config:
 
-| Signal | Weight env var | Default |
-|---|---|---|
-| Influential | `W_INFLUENTIAL` | 2 |
-| Verified organization | `W_VERIFIED` | 1 |
-| Followed | `W_FOLLOWED` | 2 |
-| VIP | `W_VIP` | 4 |
-| High engagement | `W_ENGAGEMENT` | 2 |
+| Signal | Source | Rule | Weight env var | Default |
+|---|---|---|---|---|
+| Influential author | X user `public_metrics` | `followers_count >= INFLUENCER_MIN_FOLLOWERS` (5,000) | `W_INFLUENTIAL` | 2 |
+| Verified organization | X user `verified_type` | `business` or `government` (a paid blue checkmark does not count) | `W_VERIFIED` | 1 |
+| Followed author | following cache | author in set | `W_FOLLOWED` | 2 |
+| VIP author | `vip.txt` | author in set | `W_VIP` | 4 |
+| High engagement | reply `public_metrics` | `like_count + reply_count + retweet_count >= ENGAGEMENT_MIN` (10), measured once (section 1) | `W_ENGAGEMENT` | 2 |
 
-### 4.2 Grok Classification
+`rule_weight` is the sum of the weights for the signals that fired.
 
-Every new reply (after dedupe) is sent to Grok, which returns JSON matching this schema:
+### 4.3 Grok Classification
+
+Every reply that passes the bot filter and has not been seen before is sent to Grok, which returns JSON matching this schema:
 
 ```json
 {
@@ -134,7 +146,7 @@ Every new reply (after dedupe) is sent to Grok, which returns JSON matching this
   "category": "opportunity | question | criticism | misinformation | positive | none",
   "urgency": 1,
   "reason": "One sentence on why Kevin should (or need not) respond.",
-  "suggested_reply": "At most 280 characters, in Kevin's voice. Empty when category is none."
+  "suggested_reply": "At most 280 characters, in Kevin's voice. Empty when category is positive or none."
 }
 ```
 
@@ -149,7 +161,7 @@ Every new reply (after dedupe) is sent to Grok, which returns JSON matching this
 - Grok receives the original post text, the reply text, the author's handle, bio, and follower count, and the rule-based signals that fired, so it can explain its reasoning.
 - For quote posts, Grok is told the text is commentary shared with the author's own followers rather than a message addressed to Kevin. The suggested reply is written as a reply under the quote post, and for criticism Grok may suggest "no response needed" by setting a low urgency.
 
-### 4.3 Final Score and Threshold
+### 4.4 Final Score and Surfacing Rules
 
 ```
 score = rule_weight + urgency
@@ -326,7 +338,7 @@ DIGEST_TIMEZONE=America/Edmonton
 | `src/config.py` | Lazy, typed settings object (see section 15) |
 | `src/x_client.py` | X API calls, pagination, rate-limit backoff, call counting |
 | `src/store.py` | SQLite schema, migrations, cursors, dedupe, retention |
-| `src/botfilter.py` | Bot score signals and the pre-filter (section 4.0) |
+| `src/botfilter.py` | Bot score signals and the pre-filter (section 4.1) |
 | `src/scoring.py` | Rule-based signals and weights, final score, threshold logic |
 | `src/classifier.py` | Grok batching, prompt, JSON schema validation |
 | `src/emailer.py` | Digest rendering (HTML and text) and SMTP send |
@@ -345,6 +357,16 @@ DIGEST_TIMEZONE=America/Edmonton
 
 New dependency: `httpx` for the X API (plus `respx` for test mocking). No X SDK is required.
 
+### Test Fixtures
+
+X has no sandbox, so tests run against recorded responses:
+
+- `scripts/probe_x.py --record` (milestone M0) saves real responses from the posts lookup, the search, and the following list under `tests/fixtures/x/`.
+- Before saving, handles, display names, user IDs, and profile URLs are replaced with consistent placeholders (`@user_001`, and so on). Reply text is kept so classification tests stay realistic.
+- Hand-written fixtures cover the edge cases: a bot-like account, a VIP technical question, an off-topic question, a quote post, a misinformation reply, and a paginated search.
+- `tests/test_x_client.py` and `tests/test_digest.py` use these fixtures through `respx`. The end-to-end test runs the full pipeline with a mocked Grok client and a mocked SMTP server.
+- The same fixtures can be used to rehearse the hackathon demo flow without waiting for real replies.
+
 ## 11. Error Handling
 
 - **X API 429:** wait until the `x-rate-limit-reset` header time (capped at 15 minutes), then retry. After 3 failures, end the run without advancing the cursor, so the next run picks up the same results.
@@ -353,6 +375,7 @@ New dependency: `httpx` for the X API (plus `respx` for test mocking). No X SDK 
 - **Grok errors:** retry once with backoff. On a second failure, save the replies without a classification. They are retried next run and scored with rule weights only in the meantime.
 - **SMTP authentication error (535):** logged with a hint to check the Gmail App Password. No failure email is attempted, since it would fail the same way.
 - **Other SMTP failures:** the run is marked failed and `notified_at` is not set, so the items are included in the next digest.
+- **Partial Grok batch responses:** each returned item is matched to the batch by `reply_id`. Items with an unknown `reply_id` are discarded. Replies missing from the response, or whose item fails schema validation, are retried individually, one request each. Replies that still fail are handled like Grok errors above. One bad item never fails the whole batch.
 - Every run writes a row to `runs` with its status and error.
 
 ## 12. Security and Privacy
@@ -361,16 +384,22 @@ New dependency: `httpx` for the X API (plus `respx` for test mocking). No X SDK 
 - Reply data is stored only in the local SQLite file and purged after `RETENTION_DAYS`.
 - Reply text sent to Grok is limited to what is needed for classification (post text, reply text, and author public profile fields).
 - Prompt-injection defense: reply text is delimited and treated as data (section 5). Drafts are never posted automatically.
+- Local `.env` protection: `.env` must be `chmod 600`. At startup, if a `.env` file exists and is readable by group or others, the bot logs a warning naming the file and the fix (`chmod 600 .env`). It never prints the file's contents.
+- The repository is public. `.gitignore` covers `.env`, `data/`, `*.db`, `vip.txt`, and `.venv/` so secrets, VIP handles, and stored reply data are never committed.
 
 ## 13. Milestones
 
 | Milestone | Scope | Done when |
 |---|---|---|
-| M0 | `scripts/probe_x.py`: run one real search with the operators from section 3.1 on Kevin's plan, and print the results and the maximum accepted query length | `to:`, `quotes_of_tweet_id:`, and `is:reply` are confirmed working, and `X_MAX_QUERY_LENGTH` is set from the result. If an operator is unavailable, section 3 is revised before M1 |
+| M0 | `scripts/probe_x.py`: run one real search with the operators from section 3.1 on Kevin's plan, and print the results and the maximum accepted query length. With `--record`, save anonymized responses as test fixtures | `to:`, `quotes_of_tweet_id:`, and `is:reply` are confirmed working, and `X_MAX_QUERY_LENGTH` is set from the result. If an operator is unavailable, section 3 is revised before M1 |
 | M1 | Fix scaffold issues (section 15), lazy config, `x_client`, `store`, and printing new replies in the CLI | `python -m src.digest --dry-run` lists new replies and quote posts of recent posts, each labeled by kind |
 | M2 | `botfilter`, `scoring`, and `classifier` | Dry run shows ranked items with reasons and drafts, and a count of filtered bot replies |
 | M3 | `emailer` and Gmail SMTP | A real digest sent from Gmail arrives at `DIGEST_TO`, and the same items are not repeated |
 | M4 | Deploy to the "X Reply Scout" Bot in Grok Bot (section 8.1) with secrets and a routine, plus the lock file, usage logging, failure email, and retention | Two scheduled routine runs complete unattended, state persists between them, and `runs` shows the API call counts |
+
+### Future Work (after v1)
+
+- **Quality feedback loop:** each digest item gets "Useful: yes / no" `mailto:` links that send a pre-filled email to Kevin's Gmail (subject `GrokBot feedback <reply_id> yes|no`). A later version reads those emails and reports precision per category, which guides tuning of the weights and `SCORE_THRESHOLD`. Not part of v1.
 
 ### Hackathon Demo
 
@@ -390,6 +419,12 @@ None in the spec itself. Further questions are tracked in [questionsandrecommend
 
 - One search per run with a global cursor (section 3.1), confirmed first by a probe script (milestone M0).
 - Grok categories describe content only (R4).
+- Section 4 reordered to match the pipeline, with a pipeline diagram in section 1 (R5).
+- `.gitignore` covers `data/`, `*.db`, and `vip.txt` (R6, section 12).
+- `.env` permission check at startup (R7, section 12).
+- Partial Grok batch responses retried per item (R8, section 11).
+- Recorded, anonymized X fixtures for tests (R9, section 10).
+- Feedback loop noted as future work (R10, section 13).
 - Verified signal: only `business` and `government` checkmarks count (section 4).
 - Already-answered replies and one-time engagement checks: accepted as known limitations (section 1).
 - Questions count only when on topic. VIP replies are surfaced only for technical questions, and pleasantries are never surfaced (section 4).
@@ -399,7 +434,7 @@ None in the spec itself. Further questions are tracked in [questionsandrecommend
 - Hackathon demo: the live X reply bot (section 13).
 - Runtime: a Bot in the Grok Bot app that runs the script on a routine, with state in `/workspace` and keys in Bot Secrets (section 8.1).
 - Drafting voice: `voice.md`, built from Kevin's public Bluesky, LinkedIn, and Big Hat Group content (X itself requires login to read).
-- Bot replies: filtered locally before Grok (section 4.0).
+- Bot replies: filtered locally before Grok (section 4.1).
 - Email sending: Kevin's personal Gmail over SMTP with an App Password (section 7.1).
 - X API budget: managed by Kevin in the X developer console. The bot reports call counts only (section 3.3).
 - Quote posts: included in v1 and fetched in the same search call as replies (sections 3.1 and 3.2). Replies under other people's quote posts are out of scope.

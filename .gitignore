@@ -6,6 +6,12 @@
 *.pem
 secrets/
 
+# GrokBot local state and private lists
+data/
+*.db
+*.db-journal
+vip.txt
+
 # Python
 __pycache__/
 *.py[cod]
