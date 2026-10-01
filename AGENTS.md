@@ -5,6 +5,9 @@
 GrokBotDemo is a Python-based conversational AI bot that uses the xAI Grok API.
 It was created for the Meetup Hackathon.
 
+The product being built is a reply follow-up bot for X. Read [spec.md](spec.md)
+before making changes; it defines scope, modules, configuration, and milestones.
+
 ## Development Rules
 
 - Do **not** commit secrets, API keys, or `.env` files.
@@ -24,7 +27,7 @@ pip install -r requirements.txt
 
 Run the bot:
 ```
-python src/bot.py
+python -m src.bot
 ```
 
 Lint:

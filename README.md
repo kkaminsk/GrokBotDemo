@@ -8,6 +8,8 @@
 
 GrokBotDemo is an AI agent that connects to the Grok API to answer questions, assist with tasks, and demonstrate agentic coding capabilities — all from a simple Python interface.
 
+The main feature in progress is a reply follow-up bot for X: it finds replies to your posts that deserve a response and emails you a digest with Grok-drafted suggested replies. See [spec.md](spec.md) for the full specification.
+
 ---
 
 ## Architecture
@@ -16,6 +18,7 @@ GrokBotDemo is an AI agent that connects to the Grok API to answer questions, as
 /
 ├── README.md         # You are here
 ├── AGENTS.md         # Persistent instructions for Grok Bot / AI agents
+├── spec.md           # X reply follow-up bot specification
 ├── .gitignore        # Excludes secrets, build output, local state
 ├── .env.example      # Template for required environment variables
 ├── requirements.txt  # Python dependencies
@@ -61,7 +64,7 @@ cp .env.example .env
 ## Running the Bot
 
 ```bash
-python src/bot.py
+python -m src.bot
 ```
 
 ---
