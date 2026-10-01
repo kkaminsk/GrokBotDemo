@@ -1,57 +1,12 @@
 # Questions and Recommendations
 
-Review of [spec.md](spec.md) (rev 5), listing what is still needed before building.
-Each question includes a recommended default, so "go with the defaults" is a valid answer.
+Review of [spec.md](spec.md) (rev 6), listing what is still needed before building.
 Answers get folded back into `spec.md`, and resolved items are removed from this file.
 Numbers stay the same as items are resolved, so references don't shift.
 
-Resolved so far: Q1, Q2, Q4, and Q10, and R1, R2, and R3 (see spec section 14).
-
-## Questions
-
-### Q3. Should plain direct questions count?
-
-In the original Q&A, "direct questions asked to me" was not selected. But someone asking "How did you configure Intune for this?" is often the reply most worth answering.
-
-**Recommended:** add a `question` category for Grok, scored on its urgency like the others.
-
-### Q5. Should VIPs always be surfaced, even for "great post!"?
-
-The spec currently surfaces every VIP reply regardless of content.
-
-**Recommended:** VIP replies are always surfaced unless Grok returns `category = none`. Those are listed in a one-line "VIPs who engaged" section at the bottom of the digest, with no draft.
-
-### Q6. What language should drafts be in?
-
-**Recommended:** reply in the language of the reply. Most will be English. If you want English always, say so.
-
-### Q7. What does the hackathon demo look like, and when is it?
-
-This decides how much of milestones M0 to M4 is realistic and whether a demo mode is needed.
-
-**Recommended:** add a `--demo` flag that runs the full pipeline against recorded sample replies (no X API calls) and prints or emails the digest. That way the demo works on stage even without Wi-Fi or API credits.
-
-### Q8. Which Grok model?
-
-`.env.example` says `grok-3`. Newer Grok models are available and may be cheaper or better at structured output.
-
-**Recommended:** check the current model list at console.x.ai at build time and choose the cheapest model that supports JSON-schema structured output reliably. Keep it configurable through `GROK_MODEL`.
-
-### Q9. How many accounts do you follow?
-
-The following list is fetched daily, 1,000 accounts per call. Under pay-per-use, every account returned is a billed read.
-
-**Recommended:** under about 2,000 follows, keep the daily refresh. Above that, refresh weekly, or drop the following list and rely on `vip.txt` only.
+Resolved so far: all questions (Q1 to Q10), and recommendations R1 to R4 (see spec section 14).
 
 ## Recommendations (spec changes)
-
-### R4. Fix the Grok categories so they describe content only
-
-The `vip` and `influential_engagement` categories duplicate the rule-based signals, and Grok can't know who your VIPs are anyway. Change the categories to:
-
-`opportunity | question | criticism | misinformation | positive | none`
-
-The rule-based weights continue to handle who the author is. The digest groups items by category, with VIP items listed first.
 
 ### R5. Reorder section 4 to match the pipeline
 
@@ -71,7 +26,7 @@ When 10 replies are sent and Grok returns 9 results, or a mismatched `reply_id`,
 
 ### R9. Test with recorded fixtures
 
-X has no sandbox. Save a few real search responses (with handles anonymized) under `tests/fixtures/`, for example from the M0 probe script. Use them in the `x_client` and end-to-end tests. The same fixtures can power `--demo` (Q7).
+X has no sandbox. Save a few real search responses (with handles anonymized) under `tests/fixtures/`, for example from the M0 probe script. Use them in the `x_client` and end-to-end tests. This also makes it possible to rehearse the hackathon demo flow without waiting for real replies.
 
 ### R10. Add a simple quality loop (post-hackathon)
 
@@ -86,3 +41,4 @@ To tune the thresholds, add a "Useful? yes / no" `mailto:` link to each digest i
 - [ ] Get a Grok API key from console.x.ai.
 - [ ] Review `voice.md` and edit anything that doesn't sound like you.
 - [ ] In Grok Bot, create the "X Reply Scout" Bot, add its Secrets, clone the repo to `/workspace`, and create the routine (spec section 8.1).
+- [ ] Before the demo, post on X and have a few people reply, including one on-topic technical question.

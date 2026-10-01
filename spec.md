@@ -2,7 +2,7 @@
 
 Status: Draft
 Owner: Kevin Kaminski (@kkaminsk)
-Last updated: 2026-09-30 (rev 5)
+Last updated: 2026-09-30 (rev 6)
 
 ## 1. Overview and Goals
 
@@ -36,7 +36,8 @@ GrokBot watches the replies to and quote posts of Kevin's recent posts on X, dec
 - As Kevin, I never see the same reply in two digests.
 - As Kevin, I get no email when nothing needs my attention.
 - As Kevin, I get a short failure email if a scheduled run crashes, so I know the bot is not silently broken.
-- As Kevin, I can add handles to a VIP list so those people are always surfaced.
+- As Kevin, I can add handles to a VIP list so technical questions from those people are always surfaced.
+- As Kevin, I only see questions that are on topic for my post or my areas of expertise, not random off-topic asks.
 - As Kevin, I see notable quote posts of my posts alongside replies, clearly labeled, so I don't miss commentary that happens outside my threads.
 
 ## 3. X API Integration
@@ -70,7 +71,7 @@ Kevin manages the X API budget directly in the X developer console. The bot does
 - A single global `since_id` cursor is stored in the `state` table so each run only fetches new replies and quote posts. A quiet run costs two calls: recent posts and one search.
 - `MAX_POSTS` caps how many recent posts are included as quote terms (default 20).
 - `MAX_RESULTS` caps total results (replies plus quote posts) fetched per run (default 300). If the cap is hit, the cursor advances only to the newest result actually processed, so nothing is skipped and the rest is picked up next run.
-- The following list is refreshed at most once every 24 hours.
+- The following list is refreshed at most once every 24 hours. Kevin follows several hundred accounts, so this is one call per day.
 - Each run records the number of X calls and returned objects in the `runs` table and the digest footer.
 
 ## 4. Follow-up Criteria and Scoring
@@ -83,6 +84,7 @@ Replies and quote posts are scored the same way. In this section, "reply" means 
 | Verified organization | X user `verified_type` | `business` or `government` (a paid blue checkmark does not count) |
 | Followed or VIP author | following cache + `vip.txt` | author in set |
 | High engagement | reply `public_metrics` | `like_count + reply_count + retweet_count >= ENGAGEMENT_MIN` (10) |
+| On-topic question | Grok | `category == question` |
 | Criticism or misinformation | Grok | `category` in (`criticism`, `misinformation`) |
 | Business opportunity | Grok | `category == opportunity` |
 
@@ -129,13 +131,20 @@ Every new reply (after dedupe) is sent to Grok, which returns JSON matching this
 {
   "reply_id": "string",
   "kind": "reply | quote",
-  "category": "opportunity | criticism | misinformation | influential_engagement | vip | none",
+  "category": "opportunity | question | criticism | misinformation | positive | none",
   "urgency": 1,
   "reason": "One sentence on why Kevin should (or need not) respond.",
   "suggested_reply": "At most 280 characters, in Kevin's voice. Empty when category is none."
 }
 ```
 
+- Categories describe the **content** only. Who the author is (VIP, followed, influential) is handled by the rule-based weights, so Grok never needs to know Kevin's VIP list.
+  - `opportunity`: business, collaboration, speaking, or hiring interest.
+  - `question`: a genuine technical question that is **on topic**, meaning it relates to the original post or to Kevin's areas of expertise (Windows 365, Intune, Azure, MSIX/App-V, Microsoft 365 Copilot, agentic AI, OpenClaw, MCP). Off-topic questions are `none`.
+  - `criticism`: disagreement or a complaint about Kevin's post or work.
+  - `misinformation`: a factually wrong claim about the topic that could mislead readers.
+  - `positive`: praise, thanks, or agreement with nothing to answer ("great post!").
+  - `none`: everything else, including off-topic questions.
 - `urgency` is an integer from 1 (can ignore) to 5 (respond today).
 - Grok receives the original post text, the reply text, the author's handle, bio, and follower count, and the rule-based signals that fired, so it can explain its reasoning.
 - For quote posts, Grok is told the text is commentary shared with the author's own followers rather than a message addressed to Kevin. The suggested reply is written as a reply under the quote post, and for criticism Grok may suggest "no response needed" by setting a low urgency.
@@ -146,19 +155,25 @@ Every new reply (after dedupe) is sent to Grok, which returns JSON matching this
 score = rule_weight + urgency
 ```
 
-- A reply enters the digest when `score >= SCORE_THRESHOLD` (default 5), **or** the author is on the VIP list (always surfaced), **or** `category` is `misinformation` with `urgency >= 3`.
-- Replies with `category == none` and no rule signals are dropped regardless of score.
+- A reply enters the digest when `score >= SCORE_THRESHOLD` (default 5), **or** it is a `question` from a VIP (always surfaced), **or** `category` is `misinformation` with `urgency >= 3`.
+- Replies with `category` of `positive` or `none` are never surfaced, regardless of author or score. Pleasantries need no follow-up, including from VIPs.
 - The digest is capped at `DIGEST_MAX_ITEMS` (default 10), highest score first.
 
 ## 5. Grok Usage
 
 - Grok is called through the existing OpenAI-compatible client (`create_client()` in `src/bot.py`) against `GROK_BASE_URL` with model `GROK_MODEL`.
+- Default model: `grok-4.3`. It is xAI's flagship for low hallucination and tool use, supports strict `json_schema` structured output, and costs $1.25 per million input tokens and $2.50 per million output tokens, less than `grok-4.6`. A typical run of 10 to 30 replies uses well under 50,000 tokens.
 - Requests use structured output (`response_format` with a JSON schema) so the response parses without guesswork. Responses that fail validation are retried once and then skipped and logged.
 - Replies are batched (`GROK_BATCH_SIZE`, default 10) into a single request that returns an array of results, to reduce cost and latency.
 - The system prompt includes:
   - Kevin's voice description, loaded from `voice.md` (committed in the repo root; built from Kevin's public posts and profile).
   - The category definitions and scoring guidance from section 4.
-  - Rules for drafts: at most 280 characters, no hashtags unless the reply used them, no promises of meetings or money, polite even toward criticism, and corrections cite facts without being combative.
+  - Rules for drafts:
+    - Written in English, in a **formal**, professional register: complete sentences, no slang, no emoji.
+    - **Never patronizing.** Treat the person as a peer. No "Great question!", no flattery, no explaining basics they clearly already know, no condescending corrections.
+    - For technical questions, answer the question directly and concisely, adding one supporting detail or reference if useful.
+    - At most 280 characters, no hashtags unless the reply used them, no promises of meetings or money.
+    - Courteous toward criticism. Corrections state the fact plainly without being combative.
 - Reply text is treated as untrusted input. It is wrapped in clear delimiters, and the prompt instructs Grok to ignore any instructions inside it.
 
 ## 6. State
@@ -194,7 +209,7 @@ The digest is sent from Kevin's personal Gmail account over SMTP with STARTTLS, 
 
 - Subject: `GrokBot: 4 replies and 1 quote post to follow up on (Sep 30, 08:00)`.
 - The email is multipart, with HTML and plain-text bodies.
-- Items are grouped by category in this order: VIP, Opportunity, Misinformation, Criticism, Influential engagement.
+- Items are grouped in this order: VIP questions, Opportunity, Question, Misinformation, Criticism.
 - Each item shows:
   - A `Reply` or `Quote post` label.
   - The author's display name, @handle, follower count, and a verified marker.
@@ -357,6 +372,16 @@ New dependency: `httpx` for the X API (plus `respx` for test mocking). No X SDK 
 | M3 | `emailer` and Gmail SMTP | A real digest sent from Gmail arrives at `DIGEST_TO`, and the same items are not repeated |
 | M4 | Deploy to the "X Reply Scout" Bot in Grok Bot (section 8.1) with secrets and a routine, plus the lock file, usage logging, failure email, and retention | Two scheduled routine runs complete unattended, state persists between them, and `runs` shows the API call counts |
 
+### Hackathon Demo
+
+The demo is the live X reply bot itself, with no separate demo mode:
+
+1. Show the "X Reply Scout" Bot and its routine in Grok Bot.
+2. Press **Test** on the routine to trigger a run.
+3. Show the run output in the Bot's chat and the digest email arriving: flagged items, reasons, and formal drafted replies.
+
+To make sure there is something to show, post a fresh post on X before the demo and have a few people reply to it, ideally including one on-topic technical question.
+
 ## 14. Open Questions
 
 None in the spec itself. Further questions are tracked in [questionsandrecommendations.md](questionsandrecommendations.md).
@@ -364,8 +389,14 @@ None in the spec itself. Further questions are tracked in [questionsandrecommend
 ### Resolved
 
 - One search per run with a global cursor (section 3.1), confirmed first by a probe script (milestone M0).
+- Grok categories describe content only (R4).
 - Verified signal: only `business` and `government` checkmarks count (section 4).
 - Already-answered replies and one-time engagement checks: accepted as known limitations (section 1).
+- Questions count only when on topic. VIP replies are surfaced only for technical questions, and pleasantries are never surfaced (section 4).
+- Drafts: English, formal register, never patronizing (section 5).
+- Model: `grok-4.3` (section 5).
+- Following list: several hundred accounts, refreshed daily (section 3.3).
+- Hackathon demo: the live X reply bot (section 13).
 - Runtime: a Bot in the Grok Bot app that runs the script on a routine, with state in `/workspace` and keys in Bot Secrets (section 8.1).
 - Drafting voice: `voice.md`, built from Kevin's public Bluesky, LinkedIn, and Big Hat Group content (X itself requires login to read).
 - Bot replies: filtered locally before Grok (section 4.0).

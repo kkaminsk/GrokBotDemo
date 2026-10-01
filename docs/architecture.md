@@ -12,7 +12,7 @@ User (CLI)
     ▼
 bot.py::chat()
     │  POST /v1/chat/completions
-    │  model: grok-3
+    │  model: grok-4.3
     │  messages: [system, ...history, user]
     ▼
 xAI Grok API (api.x.ai)
